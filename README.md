@@ -2,12 +2,11 @@
 
 ## Purpose
 
-This plugin reproduces and visualises two questionable DaVinci Resolve
-behaviours. Details are in the header comment of
-[InquiryPlugin.cpp](InquiryPlugin.cpp).
+This plugin reproduces and visualises behaviours that appear to be bugs in
+DaVinci Resolve 21's handling of OFX plugins. Details are in the header comment
+of [InquiryPlugin.cpp](InquiryPlugin.cpp).
 
-1. **When a generator clip is placed inside an in/out range, `render()` always
-   receives `time = 0`.**
+1. **Under certain conditions, `render()` is always handed `time = 0`.**
    The rectangle's size is derived solely from `RenderArguments::time`, so it
    normally changes as the clip plays. However, once in/out points are set and a
    clip is placed within that range, the size no longer changes during playback.
@@ -23,8 +22,7 @@ behaviours. Details are in the header comment of
 ## Build
 
 The only dependency is the SDK bundled with DaVinci Resolve (OpenFX-1.4 headers +
-Support sources). It builds exactly like the OpenFX sample `GainPlugin`: simply
-compile `InquiryPlugin.cpp` together with the OFX Support library sources.
+Support sources). It builds the same way as the sample `GainPlugin`.
 
 ## Install (Windows)
 

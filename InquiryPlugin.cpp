@@ -1,22 +1,39 @@
-// Minimal OFX plugin built to inquire with Blackmagic about two DaVinci Resolve
-// host behaviours. The plugin renders a centred rectangle whose size is a direct
-// function of arg.time, and offers a button that sets a keyframe at time 0, so
-// both issues below can be observed/reproduced visually.
+// A plugin built to confirm behaviours that appear to be bugs in DaVinci
+// Resolve 21.
+// It renders a centred rectangle whose size varies with arg.time, and also
+// offers a button that sets a keyframe at time 0, so the two issues below can be
+// confirmed/reproduced visually.
 //
-// 1. The rectangle size is animated purely from RenderArguments::time, so in
+// DaVinci Resolve 21での不具合と思われる挙動を確認するためのプラグイン
+// 中央に四角形を描画し、そのサイズは arg.time に連動して変化します
+// また time 0 の位置にキーフレームを設定するボタンも備えており、
+// 下記 2 つの問題を視覚的に確認・再現できます。
+//
+// 1. The rectangle size is determined purely from RenderArguments::time, so in
 //    normal use it changes continuously as the clip plays. However, when in/out
 //    points are set and a clip is placed within that in/out range, the size no
 //    longer changes during playback: the rectangle stays frozen. The cause is
-//    that render() is always handed time=0 in this case, instead of the clip's
-//    actual timeline frame. See the size computation in render() below, which
-//    depends only on p_Args.time.
+//    that render() is always handed time=0, so the clip's actual time never
+//    arrives.
+//
+//    四角形のサイズは RenderArguments::time のみから決まるため、通常はクリップ
+//    の再生に伴って連続的に変化します。しかし in/out 点を設定し、その in/out 区間
+//    内にクリップを配置すると、再生してもサイズが変化せず四角形が固まったまま
+//    になる。原因は、render() に常に time=0 が渡され、クリップの実際の
+//    時間が渡ってこないためです。
 //
 // 2. Cut a clip so it becomes two separate clips, then operate on the second
-//    (trailing) clip. The two are distinct clips, so setting a keyframe at
-//    frame 0 should land on that second clip's own frame 0 (expected). Instead,
-//    the keyframe is placed at frame 0 of the first (leading) clip.
-//    => Reproduced by pressing the "Key Size Scale at 0" button on the second
-//       clip, which calls setValueAtTime(0.0, 1.0) in changedParam() below.
+//    (trailing) clip. On the second clip, use the "Set key frame" button to set
+//    a keyframe at time 0. The expected behaviour is for the keyframe to
+//    land on the second clip's own time 0. Instead, it is placed at time 0 of
+//    the first (leading) clip. For a split clip, the time origin seems to remain
+//    at the pre-split position.
+//
+//    クリップをカットして2つの別クリップに分割し、2番目(後ろ)のクリップを操作します。
+//    2番目クリップで、`Set key frame`ボタンを使用してtime 0にキーフレームを設定します。
+//    期待値動作は 2番目のクリップのtime 0 にキーフレームが設定されることです。
+//    しかし実際には1番目(前)のクリップのtime 0 の位置にキーフレームが設定されてしまう。
+//    分割されたクリップにおいて起点が分割前の位置になってしまっているようです。
 
 #include "InquiryPlugin.h"
 
@@ -133,7 +150,7 @@ void InquiryPluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_Desc,
 
     // Button that keyframes the size coefficient to 1.0 at time 0.
     PushButtonParamDescriptor* reset = p_Desc.definePushButtonParam(kParamResetSize);
-    reset->setLabels("Key Size Scale at 0", "Key Size Scale at 0", "Key Size Scale at 0");
+    reset->setLabels("Set key frame", "Set key frame", "Set key frame");
     reset->setHint("Set a keyframe of value 1.0 on the size coefficient at time 0.");
     page->addChild(*reset);
 }
