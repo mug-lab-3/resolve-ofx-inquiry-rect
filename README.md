@@ -6,13 +6,13 @@ This plugin reproduces and visualises behaviours that appear to be bugs in
 DaVinci Resolve 21's handling of OFX plugins. Details are in the header comment
 of [InquiryPlugin.cpp](InquiryPlugin.cpp).
 
-### 1. Under certain conditions, `render()` is always handed `time = 0`
+### 1. Under certain conditions, `render()` is handed an invalid, fixed time
 
 The rectangle's size is derived solely from `RenderArguments::time`, so it
 normally changes as the clip plays. However, once in/out points are set and a
 clip is placed within that range, the size no longer changes during playback.
-This is because `render()` is always handed `time = 0` instead of the clip's
-actual time.
+This is because `render()` is handed an invalid time (such as 0 or a negative
+value) fixed to a single value instead of the clip's actual time.
 
 ### 2. A keyframe set on a split clip lands at an unexpected time
 

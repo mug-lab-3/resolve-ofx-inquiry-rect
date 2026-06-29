@@ -13,14 +13,14 @@
 //    normal use it changes continuously as the clip plays. However, when in/out
 //    points are set and a clip is placed within that in/out range, the size no
 //    longer changes during playback: the rectangle stays frozen. The cause is
-//    that render() is always handed time=0, so the clip's actual time never
-//    arrives.
+//    that render() is handed an invalid time (such as 0 or a negative value)
+//    fixed to a single value, so the clip's actual time never arrives.
 //
 //    四角形のサイズは RenderArguments::time のみから決まるため、通常はクリップ
 //    の再生に伴って連続的に変化します。しかし in/out 点を設定し、その in/out 区間
 //    内にクリップを配置すると、再生してもサイズが変化せず四角形が固まったまま
-//    になる。原因は、render() に常に time=0 が渡され、クリップの実際の
-//    時間が渡ってこないためです。
+//    になる。原因は、render() に渡される time が不正な値(0 や負の値など)で固定
+//    され、クリップの実際の時間が渡ってこないためです。
 //
 // 2. Cut a clip so it becomes two separate clips, then operate on the second
 //    (trailing) clip. On the second clip, use the "Set key frame" button to set
@@ -37,8 +37,16 @@
 
 #include "InquiryPlugin.h"
 
+#include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <ctime>
 #include <memory>
+#include <sstream>
+#include <string>
 
 #include "ofxsImageEffect.h"
 
@@ -53,34 +61,78 @@
 
 #define kParamSizeScale "sizeScale"
 #define kParamResetSize "resetSize"
+#define kParamShowState "showState"
+#define kParamStateText "stateText"
+
+#define kStateHistory 5
 
 ////////////////////////////////////////////////////////////////////////////////
 
+namespace {
+
+struct CallRecord {
+    std::chrono::system_clock::time_point wallClock_;
+    double argsTime_;
+};
+
+auto formatState(uint64_t pCallCount, const std::array<CallRecord, kStateHistory>& pHistory, int pHead) -> std::string {
+    std::ostringstream out;
+
+    const uint64_t shown = std::min<uint64_t>(pCallCount, kStateHistory);
+    for (uint64_t i = 0; i < shown; ++i) {
+        // Walk from the oldest retained entry to the newest.
+        const int idx = (pHead + kStateHistory - static_cast<int>(shown) + static_cast<int>(i)) % kStateHistory;
+        const CallRecord& rec = pHistory[idx];
+
+        const std::time_t secs = std::chrono::system_clock::to_time_t(rec.wallClock_);
+        const auto millis =
+            std::chrono::duration_cast<std::chrono::milliseconds>(rec.wallClock_.time_since_epoch()).count() % 1000;
+        std::tm tm{};
+#if defined(_WIN32)
+        localtime_s(&tm, &secs);
+#else
+        localtime_r(&secs, &tm);
+#endif
+        std::array<char, 16> clockStr{};
+        std::snprintf(clockStr.data(), clockStr.size(), "%02d:%02d:%02d.%03lld", tm.tm_hour, tm.tm_min, tm.tm_sec,
+                      static_cast<long long>(millis));
+        out << clockStr.data() << "  " << rec.argsTime_ << "\n";
+    }
+    return out.str();
+}
+
+}  // namespace
+
 class InquiryPlugin : public OFX::ImageEffect {
    public:
-    explicit InquiryPlugin(OfxImageEffectHandle p_Handle) : ImageEffect(p_Handle) {
-        m_DstClip = fetchClip(kOfxImageEffectOutputClipName);
-        m_SizeScale = fetchDoubleParam(kParamSizeScale);
+    explicit InquiryPlugin(OfxImageEffectHandle pHandle) : ImageEffect(pHandle) {
+        mDstClip_ = fetchClip(kOfxImageEffectOutputClipName);
+        mSizeScale_ = fetchDoubleParam(kParamSizeScale);
+        mStateText_ = fetchStringParam(kParamStateText);
     }
 
-    virtual void changedParam(const OFX::InstanceChangedArgs& /*p_Args*/, const std::string& p_ParamName) {
-        if (p_ParamName == kParamResetSize) {
+    void changedParam(const OFX::InstanceChangedArgs& /*args*/, const std::string& paramName) override {
+        if (paramName == kParamResetSize) {
             // Set a keyframe of value 1.0 at time 0 on the size coefficient.
-            m_SizeScale->setValueAtTime(0.0, 1.0);
+            mSizeScale_->setValueAtTime(0.0, 1.0);
+        } else if (paramName == kParamShowState) {
+            mStateText_->setValue(formatState(mCallCount_, mHistory_, mHistoryHead_));
         }
     }
 
-    virtual void getClipPreferences(OFX::ClipPreferencesSetter& p_ClipPreferences) {
-        p_ClipPreferences.setOutputFrameVarying(true);
+    void getClipPreferences(OFX::ClipPreferencesSetter& clipPreferences) override {
+        clipPreferences.setOutputFrameVarying(true);
     }
 
-    virtual void render(const OFX::RenderArguments& p_Args) {
-        if ((m_DstClip->getPixelDepth() != OFX::eBitDepthFloat) ||
-            (m_DstClip->getPixelComponents() != OFX::ePixelComponentRGBA)) {
+    void render(const OFX::RenderArguments& args) override {
+        recordCall(args.time);
+
+        if ((mDstClip_->getPixelDepth() != OFX::eBitDepthFloat) ||
+            (mDstClip_->getPixelComponents() != OFX::ePixelComponentRGBA)) {
             OFX::throwSuiteStatusException(kOfxStatErrUnsupported);
         }
 
-        std::unique_ptr<OFX::Image> dst(m_DstClip->fetchImage(p_Args.time));
+        std::unique_ptr<OFX::Image> dst(mDstClip_->fetchImage(args.time));
         const OfxRectI bounds = dst->getBounds();
         const int cx = (bounds.x1 + bounds.x2) / 2;
         const int cy = (bounds.y1 + bounds.y2) / 2;
@@ -89,81 +141,104 @@ class InquiryPlugin : public OFX::ImageEffect {
         // wave ramps the box between 10% and 50% of the frame, phase-shifted a
         // quarter period so time=0 lands mid-size.
         constexpr double kPeriod = 100.0;
-        const double phased = p_Args.time + (kPeriod * 0.25);
+        const double phased = args.time + (kPeriod * 0.25);
         const double tri = 1.0 - std::abs((std::fmod(phased, kPeriod) / (kPeriod * 0.5)) - 1.0);
-        const double fraction = (0.1 + 0.4 * tri) * m_SizeScale->getValueAtTime(p_Args.time);
+        const double fraction = (0.1 + (0.4 * tri)) * mSizeScale_->getValueAtTime(args.time);
         const int halfWidth = static_cast<int>((bounds.x2 - bounds.x1) * fraction * 0.5);
         const int halfHeight = static_cast<int>((bounds.y2 - bounds.y1) * fraction * 0.5);
 
-        const OfxRectI win = p_Args.renderWindow;
+        const OfxRectI win = args.renderWindow;
         for (int y = win.y1; y < win.y2; ++y) {
             const bool insideY = std::abs(y - cy) <= halfHeight;
             for (int x = win.x1; x < win.x2; ++x) {
-                float* pix = static_cast<float*>(dst->getPixelAddress(x, y));
-                if (!pix) continue;
-                const float v = (insideY && std::abs(x - cx) <= halfWidth) ? 1.0f : 0.0f;
+                auto* pix = static_cast<float*>(dst->getPixelAddress(x, y));
+                if (pix == nullptr) {
+                    continue;
+                }
+                const float v = (insideY && std::abs(x - cx) <= halfWidth) ? 1.0F : 0.0F;
                 pix[0] = pix[1] = pix[2] = pix[3] = v;
             }
         }
     }
 
    private:
-    OFX::Clip* m_DstClip;
-    OFX::DoubleParam* m_SizeScale;
+    // Append one render() call to the ring buffer of the most recent calls.
+    void recordCall(double argsTime) {
+        mHistory_[mHistoryHead_] = {.wallClock_ = std::chrono::system_clock::now(), .argsTime_ = argsTime};
+        mHistoryHead_ = (mHistoryHead_ + 1) % kStateHistory;
+        ++mCallCount_;
+    }
+
+    OFX::Clip* mDstClip_;
+    OFX::DoubleParam* mSizeScale_;
+    OFX::StringParam* mStateText_;
+
+    std::array<CallRecord, kStateHistory> mHistory_{};
+    int mHistoryHead_ = 0;
+    uint64_t mCallCount_ = 0;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
 
-using namespace OFX;
+using OFX::PluginFactoryArray;
 
 InquiryPluginFactory::InquiryPluginFactory()
     : OFX::PluginFactoryHelper<InquiryPluginFactory>(kPluginIdentifier, kPluginVersionMajor, kPluginVersionMinor) {
 }
 
-void InquiryPluginFactory::describe(OFX::ImageEffectDescriptor& p_Desc) {
-    p_Desc.setLabels(kPluginName, kPluginName, kPluginName);
-    p_Desc.setPluginGrouping(kPluginGrouping);
-    p_Desc.setPluginDescription(kPluginDescription);
+void InquiryPluginFactory::describe(OFX::ImageEffectDescriptor& desc) {
+    desc.setLabels(kPluginName, kPluginName, kPluginName);
+    desc.setPluginGrouping(kPluginGrouping);
+    desc.setPluginDescription(kPluginDescription);
 
     // Both a generator and an effect.
-    p_Desc.addSupportedContext(eContextGenerator);
-    p_Desc.addSupportedContext(eContextFilter);
-    p_Desc.addSupportedContext(eContextGeneral);
+    desc.addSupportedContext(OFX::eContextGenerator);
+    desc.addSupportedContext(OFX::eContextFilter);
+    desc.addSupportedContext(OFX::eContextGeneral);
 
-    p_Desc.addSupportedBitDepth(eBitDepthFloat);
+    desc.addSupportedBitDepth(OFX::eBitDepthFloat);
 }
 
-void InquiryPluginFactory::describeInContext(OFX::ImageEffectDescriptor& p_Desc, OFX::ContextEnum /*p_Context*/) {
-    // Source clip is always defined but optional, so the generator context (no
-    // connected input) still triggers render and clip access stays uniform.
-    ClipDescriptor* srcClip = p_Desc.defineClip(kOfxImageEffectSimpleSourceClipName);
-    srcClip->addSupportedComponent(ePixelComponentRGBA);
+void InquiryPluginFactory::describeInContext(OFX::ImageEffectDescriptor& desc, OFX::ContextEnum /*context*/) {
+    OFX::ClipDescriptor* srcClip = desc.defineClip(kOfxImageEffectSimpleSourceClipName);
+    srcClip->addSupportedComponent(OFX::ePixelComponentRGBA);
     srcClip->setOptional(true);
 
-    p_Desc.defineClip(kOfxImageEffectOutputClipName)->addSupportedComponent(ePixelComponentRGBA);
+    desc.defineClip(kOfxImageEffectOutputClipName)->addSupportedComponent(OFX::ePixelComponentRGBA);
 
-    PageParamDescriptor* page = p_Desc.definePageParam("Controls");
+    OFX::PageParamDescriptor* page = desc.definePageParam("Controls");
 
-    // Rectangle size coefficient.
-    DoubleParamDescriptor* sizeScale = p_Desc.defineDoubleParam(kParamSizeScale);
+    OFX::DoubleParamDescriptor* sizeScale = desc.defineDoubleParam(kParamSizeScale);
     sizeScale->setLabels("Size Scale", "Size Scale", "Size Scale");
     sizeScale->setHint("Coefficient applied to the rectangle size.");
     sizeScale->setDefault(1.0);
     sizeScale->setRange(0.0, 10.0);
     sizeScale->setDisplayRange(0.0, 2.0);
 
-    // Button that keyframes the size coefficient to 1.0 at time 0.
-    PushButtonParamDescriptor* reset = p_Desc.definePushButtonParam(kParamResetSize);
+    OFX::PushButtonParamDescriptor* reset = desc.definePushButtonParam(kParamResetSize);
     reset->setLabels("Set key frame", "Set key frame", "Set key frame");
     reset->setHint("Set a keyframe of value 1.0 on the size coefficient at time 0.");
     page->addChild(*reset);
+
+    OFX::PushButtonParamDescriptor* showState = desc.definePushButtonParam(kParamShowState);
+    showState->setLabels("Show internal state", "Show internal state", "Show internal state");
+    showState->setHint("Write the render() call count and the most recent calls into the text field.");
+    page->addChild(*showState);
+
+    OFX::StringParamDescriptor* stateText = desc.defineStringParam(kParamStateText);
+    stateText->setLabels("Internal State", "Internal State", "Internal State");
+    stateText->setHint("Recent render() calls: the render time and the args time the host passed in.");
+    stateText->setStringType(OFX::eStringTypeMultiLine);
+    stateText->setEnabled(false);
+    stateText->setDefault("(press \"Show internal state\")");
+    page->addChild(*stateText);
 }
 
-ImageEffect* InquiryPluginFactory::createInstance(OfxImageEffectHandle p_Handle, ContextEnum /*p_Context*/) {
-    return new InquiryPlugin(p_Handle);
+auto InquiryPluginFactory::createInstance(OfxImageEffectHandle handle, OFX::ContextEnum context) -> OFX::ImageEffect* {
+    return new InquiryPlugin(handle);
 }
 
-void OFX::Plugin::getPluginIDs(PluginFactoryArray& p_FactoryArray) {
+void OFX::Plugin::getPluginIDs(PluginFactoryArray& id) {
     static InquiryPluginFactory inquiryPlugin;
-    p_FactoryArray.push_back(&inquiryPlugin);
+    id.push_back(&inquiryPlugin);
 }
