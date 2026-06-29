@@ -70,6 +70,10 @@ class InquiryPlugin : public OFX::ImageEffect {
         }
     }
 
+    virtual void getClipPreferences(OFX::ClipPreferencesSetter& p_ClipPreferences) {
+        p_ClipPreferences.setOutputFrameVarying(true);
+    }
+
     virtual void render(const OFX::RenderArguments& p_Args) {
         if ((m_DstClip->getPixelDepth() != OFX::eBitDepthFloat) ||
             (m_DstClip->getPixelComponents() != OFX::ePixelComponentRGBA)) {
