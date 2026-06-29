@@ -12,7 +12,7 @@ The rectangle's size is derived solely from `RenderArguments::time`, so it
 normally changes as the clip plays. However, once in/out points are set and a
 clip is placed within that range, the size no longer changes during playback.
 This is because `render()` is always handed `time = 0` instead of the clip's
-actual timeline frame.
+actual time.
 
 ### 2. A keyframe set on a split clip lands at an unexpected time
 
